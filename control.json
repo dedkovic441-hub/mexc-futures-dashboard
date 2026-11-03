@@ -1,0 +1,6 @@
+{
+  "_help": "Written by the dashboard Controls (Start/Stop/Close all/Reset). The bot runs each nonce once; commands older than 15 min are ignored.",
+  "command": null,
+  "nonce": null,
+  "requested_at": null
+}
