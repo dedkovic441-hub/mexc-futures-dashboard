@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
 """Pusher for the public MEXC futures PAPER dashboard (GitHub Pages).
-READ-ONLY on /workspace/mexc-futures: reads status.json, ledger.json, config.json, futuresd.pid
-(and, optionally, the local dash history at 127.0.0.1:8798/api/history). Never calls watchdog.py.
-Builds data.json and pushes it every PUSH_EVERY_S seconds. Repo history stays small: the data
-lives in a single 'data snapshot' commit on top of the site commit, amended + force-pushed.
+Reads /workspace/mexc-futures status.json, ledger.json, config.json, futuresd.pid (and the local dash history at
+127.0.0.1:8798/api/history). Never calls watchdog.py. Its ONLY write there: config.json strategy.take_profit_usdt /
+stop_loss_usdt / tp_cooldown_minutes, via dash/server.py's validate()+save_settings() (atomic, locked, backup
+config.json.bak-settings-last), when the repo's settings.json changes.
+Every SAMPLE_EVERY_S: git fetch origin main. Settings sync (state in state/settings_sync.json):
+  - origin settings.json hash != last processed hash -> user edit: validate (same rules as /api/settings, keys starting
+    with '_' ignored); valid -> apply to config.json; invalid -> not applied, error shown on the page. GitHub wins.
+  - else if config.json values != last synced values (local panel save) -> mirror them into settings.json (own commit).
+Push (every PUSH_EVERY_S, or at once after a settings event): data lives in one 'data snapshot' commit by
+mexc-futures-pusher on top of origin/main. If origin's tip is that commit it is replaced (parent = its parent),
+otherwise (a user commit is on top) the new data commit goes on top of origin's tip. Pushed with
+--force-with-lease=<fetched origin sha>, so a user commit made in between is never overwritten (push fails, retried).
 Usage: python3 push.py [--once] [--no-push]"""
-import json, os, sys, time, subprocess, urllib.request, traceback
+import json, os, sys, time, subprocess, urllib.request, traceback, hashlib, importlib.util
 from datetime import datetime, timezone, timedelta
 
 BOT = "/workspace/mexc-futures"
@@ -17,6 +25,13 @@ PUSH_EVERY_S = 120
 SAMPLE_EVERY_S = 30
 DATA_MSG = "data snapshot"
 DASH_HIST = "http://127.0.0.1:8798/api/history"
+PUSHER_NAME = "mexc-futures-pusher"; PUSHER_EMAIL = "pusher@users.noreply.github.com"
+SETTINGS = "settings.json"; SYNC_FILE = os.path.join(STATE, "settings_sync.json")
+EDIT_URL = "https://github.com/dedkovic441-hub/mexc-futures-dashboard/edit/main/settings.json"
+SET_HELP = ("Edit the 3 values below and commit: take_profit_usdt = net USDT profit that closes a trade (>0, <=1000); "
+            "stop_loss_usdt = net USDT loss that closes a trade (null or 0 = off, max 1000); tp_cooldown_minutes = block "
+            "re-entry in a coin for N minutes after it closed via take profit (0 = off, max 10080 = 7 days). "
+            "Applied to the paper bot within ~1 min; invalid values are rejected and shown on the page.")
 
 def log(*a):
     print(datetime.now(WIB).strftime("%Y-%m-%d %H:%M:%S WIB"), *a, flush=True)
@@ -79,6 +94,66 @@ def downsample(h, since):
         bk[(t // step) * step] = (t, h[t])
     return [[int(t), round(v[0], 4), round(v[1], 4) if v[1] is not None else None] for t, v in (bk[k] for k in sorted(bk))]
 
+# ---------- settings sync ----------
+_SRV = None
+def srv():
+    global _SRV
+    if _SRV is None:
+        sp = importlib.util.spec_from_file_location("mf_dash_server", os.path.join(BOT, "dash", "server.py"))
+        m = importlib.util.module_from_spec(sp); sp.loader.exec_module(m); _SRV = m
+    return _SRV
+def wib_now(): return datetime.now(WIB).isoformat(timespec="seconds")
+def sha(t): return hashlib.sha256(t.encode()).hexdigest()
+def load_sync():
+    try: return json.load(open(SYNC_FILE))
+    except Exception: return {}
+def save_sync(st):
+    tmp = SYNC_FILE + ".tmp"
+    with open(tmp, "w") as fh: json.dump(st, fh, indent=1)
+    os.replace(tmp, SYNC_FILE)
+def config_values():
+    with open(os.path.join(BOT, "config.json")) as fh: return srv().current_settings(json.load(fh))
+def settings_text(v):
+    return json.dumps({"_help": SET_HELP, **{k: v.get(k) for k in ("take_profit_usdt", "stop_loss_usdt", "tp_cooldown_minutes")}}, indent=2) + "\n"
+def fetch():
+    git("fetch", "-q", "origin", "main")
+    return git("rev-parse", "refs/remotes/origin/main")
+def sync_settings(R):
+    """-> (urgent, mirror_text or None). Never raises for a bad user file."""
+    S = srv(); st = load_sync(); urgent = False; mirror = None
+    r = subprocess.run(["git", "-C", HERE, "show", f"{R}:{SETTINGS}"], capture_output=True, text=True)
+    txt = r.stdout if r.returncode == 0 else None
+    cur = config_values()
+    if txt is None:
+        mirror = settings_text(cur); st["pending_reason"] = "init"
+    elif sha(txt) != st.get("remote_hash"):
+        st["remote_hash"] = sha(txt); st["remote_seen_wib"] = wib_now(); urgent = True
+        try:
+            body = json.loads(txt)
+            if not isinstance(body, dict): raise ValueError("settings.json must be a JSON object")
+            new = S.validate({k: v for k, v in body.items() if not str(k).startswith("_")})
+        except ValueError as e:  # includes json.JSONDecodeError
+            st.update(status="rejected", error=str(e)[:300], rejected_wib=wib_now())
+            log("settings.json rejected:", st["error"])
+        else:
+            vals, changed = S.save_settings(new)
+            st.update(status="ok", error=None, last_applied=vals, last_applied_wib=wib_now(), source="github settings.json")
+            if changed: st["last_change_wib"] = st["last_applied_wib"]; st["last_change_keys"] = changed
+            log("settings.json applied:", vals, "changed:", changed or "none")
+    elif st.get("last_applied") is not None and cur != st["last_applied"]:
+        mirror = settings_text(cur); st["pending_reason"] = "local panel"
+    elif st.get("last_applied") is None:
+        st["last_applied"] = cur
+    save_sync(st)
+    return urgent or mirror is not None, mirror
+def mirror_done(text):
+    st = load_sync(); v = json.loads(text); v.pop("_help", None)
+    reason = st.pop("pending_reason", "local panel")
+    st.update(remote_hash=sha(text), last_applied=v, last_applied_wib=wib_now(), status="ok", error=None,
+              source="local panel (mirrored to settings.json)" if reason != "init" else "initialized from config.json")
+    if reason != "init": st["last_change_wib"] = st["last_applied_wib"]
+    save_sync(st); log("settings.json mirrored from config.json:", v, f"({reason})")
+
 # ---------- snapshot ----------
 def build(h):
     st = rj("status.json"); led = rj("ledger.json")
@@ -104,7 +179,7 @@ def build(h):
         "held_min": c.get("held_min"), "funding_usdt": c.get("funding_usdt"),
     } for c in closed_all[-100:]][::-1]
     wins = sum(1 for c in closed_all if (c.get("pnl_usdt") or 0) > 0)
-    port = cfg.get("portfolio", {})
+    port = cfg.get("portfolio", {}); sync = load_sync()
     r0 = iso_ts(led.get("created") or "") or 0
     return {
         "generated_at": datetime.now(WIB).isoformat(timespec="seconds"), "generated_ts": int(now),
@@ -130,6 +205,8 @@ def build(h):
                   "win_rate": round(100 * wins / len(closed_all), 1) if closed_all else None,
                   "closed_pnl_usdt": round(sum(c.get("pnl_usdt") or 0 for c in closed_all), 4)},
         "daily_realized": {k: round(v, 4) for k, v in (led.get("daily_realized") or {}).items()},
+        "settings_sync": {k: sync.get(k) for k in ("status", "error", "rejected_wib", "last_applied_wib", "last_change_wib",
+                                                    "last_change_keys", "source", "remote_seen_wib")} | {"edit_url": EDIT_URL},
         "open": opn, "closed": closed,
         "history": downsample(h, r0),
     }
@@ -140,13 +217,24 @@ def git(*a, check=True):
     if check and r.returncode: raise RuntimeError(f"git {' '.join(a)}: {r.stderr.strip()[:400]}")
     return r.stdout.strip()
 
-def push():
-    if git("log", "-1", "--format=%s") == DATA_MSG:
-        git("reset", "--soft", "HEAD~1")          # drop previous data commit, keep site commit(s)
-    git("add", "data.json")
-    git("-c", "user.name=mexc-futures-pusher", "-c", "user.email=pusher@users.noreply.github.com",
-        "commit", "-q", "-m", DATA_MSG, "--", "data.json")
-    git("push", "-q", "--force", "origin", "HEAD:main")
+def is_data_commit(rev):
+    return git("log", "-1", "--format=%s%x1f%an", rev) == f"{DATA_MSG}\x1f{PUSHER_NAME}"
+def commit(msg, path):
+    git("add", path)
+    git("-c", f"user.name={PUSHER_NAME}", "-c", f"user.email={PUSHER_EMAIL}", "commit", "-q", "--allow-empty", "-m", msg, "--", path)
+def push(R, mirror=None):
+    """rebuild on top of the fetched origin tip R; never drops a commit that is not our own data snapshot."""
+    base = git("rev-parse", f"{R}~1") if is_data_commit(R) else R
+    git("reset", "-q", "--mixed", base)           # move HEAD+index only; working tree untouched
+    if mirror is not None:
+        tmp = os.path.join(HERE, SETTINGS + ".tmp")
+        with open(tmp, "w") as fh: fh.write(mirror)
+        os.replace(tmp, os.path.join(HERE, SETTINGS))
+        commit("settings: sync from bot config (local panel)", SETTINGS)
+    elif git("ls-tree", "--name-only", "HEAD", SETTINGS):
+        git("checkout", "HEAD", "--", SETTINGS)    # keep the local copy equal to GitHub's
+    commit(DATA_MSG, "data.json")
+    git("push", "-q", f"--force-with-lease=refs/heads/main:{R}", "origin", "HEAD:main")
 
 def write_data(h):
     d = build(h)
@@ -163,11 +251,14 @@ def main():
     while True:
         try:
             sample(h)
-            if time.time() - last_push >= PUSH_EVERY_S or once:
+            R = fetch(); urgent, mirror = sync_settings(R)
+            if time.time() - last_push >= PUSH_EVERY_S or once or urgent:
                 merge_dash_hist(h); h = save_hist(h)
                 d = write_data(h)
-                if not nopush: push()
-                last_push = time.time(); fails = 0
+                if not nopush:
+                    push(R, mirror)
+                    if mirror is not None: mirror_done(mirror)
+                last_push = time.time() if mirror is None else 0; fails = 0  # after a mirror, push again next cycle so the page shows it
                 log(f"pushed eq={d['snapshot']['equity_usdt']} open={d['snapshot']['open_count']} alive={d['daemon']['alive']} hist={len(d['history'])}")
         except Exception as e:
             fails += 1; last_push = time.time() - PUSH_EVERY_S + 30 * min(fails, 4)  # retry sooner
