@@ -15,3 +15,13 @@ Fields: `take_profit_usdt` (net USDT, >0, ≤1000), `stop_loss_usdt` (net USDT, 
 `push.py` reads that branch every ~30 s, validates the file and applies it to the paper bot; invalid files are rejected (shown on the page) and not applied.
 Changes made on the bot's local dashboard are added to the settings branch as normal commits (never force-pushed).
 The `settings.json` on `main` is only a pointer to the settings branch and is ignored.
+
+## Controls (Start / Stop / Close all / Reset)
+
+The **Controls** card on the dashboard page writes `control.json` on the `settings` branch
+(`{"command": "stop|start|close_all|reset", "nonce": "<uuid>", "requested_at": "<ISO time>"}`) using the same
+GitHub token as the settings form. The bot checks it every ~30 s, runs each nonce exactly once, ignores commands
+requested more than 15 minutes earlier, and reports the result on the page ("Last command: …").
+Paper only: *Close all* closes every simulated position at the current market price; *Reset* archives the old
+ledger on the bot machine and starts a fresh 1000 USDT paper account; *Stop* pauses the bot (the watchdog will not
+restart it) until *Start*.

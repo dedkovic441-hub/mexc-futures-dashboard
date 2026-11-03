@@ -161,6 +161,30 @@ def sync_settings(R):
         st["last_applied"] = cur
     save_sync(st)
     return urgent or mirror is not None, mirror
+CONTROL = "control.json"; _CTL = None; CTL_ERR = {"error": None}
+def ctl():
+    global _CTL
+    if _CTL is None:
+        import importlib.util
+        sp = importlib.util.spec_from_file_location("mf_control", os.path.join(BOT, "control.py")); _CTL = importlib.util.module_from_spec(sp); sp.loader.exec_module(_CTL)
+    return _CTL
+def sync_control():
+    """Run control.json from the settings branch once per nonce (control.py dedups + rejects >15 min old). -> True if something ran."""
+    r = subprocess.run(["git", "-C", HERE, "show", f"refs/remotes/origin/{SET_BRANCH}:{CONTROL}"], capture_output=True, text=True)
+    if r.returncode: return False
+    try:
+        body = json.loads(r.stdout)
+        if not isinstance(body, dict): raise ValueError("control.json must be a JSON object")
+    except ValueError as e:
+        CTL_ERR["error"] = f"control.json unreadable: {e}"[:200]; return False
+    CTL_ERR["error"] = None
+    cmd, nonce = body.get("command"), body.get("nonce")
+    if not cmd or not nonce: return False
+    C = ctl()
+    if str(nonce)[:100] in C.load_state().get("processed", []): return False
+    log(f"control.json: {cmd} nonce={nonce} requested_at={body.get('requested_at')}")
+    rec = C.execute(cmd, nonce=nonce, requested_at=body.get("requested_at"), source="github page")
+    log("control result:", rec.get("status"), rec.get("detail")); return True
 def mirror_done(text):
     st = load_sync(); v = json.loads(text); v.pop("_help", None)
     reason = st.pop("pending_reason", "local panel")
@@ -222,9 +246,16 @@ def build(h):
         "daily_realized": {k: round(v, 4) for k, v in (led.get("daily_realized") or {}).items()},
         "settings_sync": {k: sync.get(k) for k in ("status", "error", "rejected_wib", "last_applied_wib", "last_change_wib",
                                                     "last_change_keys", "source", "remote_seen_wib")} | {"edit_url": EDIT_URL},
+        "control": ctl_public(),
         "open": opn, "closed": closed,
         "history": downsample(h, r0),
     }
+
+def ctl_public():
+    try: c = ctl().public_state()
+    except Exception as e: c = {"error": repr(e)[:200]}
+    if CTL_ERR["error"]: c["sync_error"] = CTL_ERR["error"]
+    return c
 
 # ---------- git ----------
 def git(*a, check=True):
@@ -260,6 +291,9 @@ def main():
         try:
             sample(h)
             R = fetch(); urgent, mirror = sync_settings(R)
+            try:
+                if sync_control(): urgent = True; sample(h)
+            except Exception as e: log("control ERROR", repr(e)); traceback.print_exc()
             if time.time() - last_push >= PUSH_EVERY_S or once or urgent:
                 if mirror is not None and not nopush:
                     gh_put_settings(mirror); mirror_done(mirror)   # settings branch, normal commit

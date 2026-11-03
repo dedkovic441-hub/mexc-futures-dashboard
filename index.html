@@ -55,6 +55,9 @@ footer a{color:var(--mut)}
 .fm button{background:var(--acc);color:#fff;border:0;border-radius:10px;padding:10px 16px;font:inherit;font-weight:600;font-size:15px;cursor:pointer}
 .fm button.sec{background:transparent;color:var(--mut);border:1px solid var(--line);font-weight:500}
 .fm button:disabled{opacity:.5}.msg{font-size:13px;margin-top:8px}.msg.ok{color:var(--g)}.msg.bad{color:var(--r)}.msg.inf{color:var(--mut)}
+.ctl{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+.ctl button{border:0;border-radius:10px;padding:12px 10px;font:inherit;font-weight:600;font-size:15px;color:#fff;cursor:pointer}.ctl button:disabled{opacity:.45}
+.c_start{background:#16a34a}.c_stop{background:#4b5563}.c_close{background:#b45309}.c_reset{background:#b91c1c}
 .rej{background:rgba(239,68,68,.14);color:var(--r);border-radius:10px;padding:8px 10px;font-size:13px;margin-top:6px}
 </style>
 </head>
@@ -91,6 +94,14 @@ footer a{color:var(--mut)}
       </div>
       <div class="msg" id="f_msg"></div>
     </div>
+  </div>
+  <div class="card" id="ctlcard">
+    <div class="row"><b style="font-size:14px">Controls</b><span class="s" style="color:var(--mut);font-size:12px" id="c_state"></span></div>
+    <div class="ctl"><button class="c_start" id="c_start">Start</button><button class="c_stop" id="c_stop">Stop</button>
+      <button class="c_close" id="c_close_all">Close all positions</button><button class="c_reset" id="c_reset">Reset account</button></div>
+    <div class="msg inf" id="c_last"></div>
+    <div class="msg" id="c_msg"></div>
+    <div class="s" style="color:var(--mut);font-size:12px;margin-top:6px">Paper only. Uses the GitHub token from Settings. The bot picks up a command within ~30 s. Stop keeps open positions (unmanaged) and the watchdog won't restart the bot until Start. Close all closes every open paper position at market. Reset archives the old ledger, then starts again at the starting balance with no positions or history.</div>
   </div>
   <div class="card">
     <div class="row"><b style="font-size:14px">Equity (USDT)</b>
@@ -145,6 +156,7 @@ function render() {
   const age = Date.now() / 1000 - D.generated_ts, s = D.snapshot, dm = D.daemon;
   const ago = age < 90 ? Math.round(age) + "s ago" : Math.round(age / 60) + " min ago";
   if (age > STALE_S) setBadge("stale", "Snapshot is stale", `last update ${fDT(D.generated_at)} WIB<br>${ago}`);
+  else if (D.control && D.control.stopped_by_user) setBadge("stale", "Stopped by user", `since ${fT(D.control.stopped_since_wib)} WIB · press Start to resume<br>${ago}`);
   else if (!dm.alive) setBadge("down", "Bot stopped", `daemon down at ${fT(D.generated_at)} WIB push<br>${ago}`);
   else setBadge("live", "LIVE, running", `updated ${fT(D.generated_at, 1)} WIB<br>${ago}`);
   $("strat").textContent = s.strategy ? "· " + s.strategy : "";
@@ -170,6 +182,10 @@ function render() {
   $("s_meta").innerHTML = `last applied at ${fH(ss.last_applied_wib)}` + (ss.last_change_wib ? ` · last change ${fH(ss.last_change_wib)}` : "") + (ss.source ? ` · via ${esc(ss.source)}` : "") + ` · edits apply within ~1 min`;
   $("s_cool").innerHTML = cds.length ? `Cooling down: ${cds.map(c => esc(base(c.symbol)) + " " + held(c.left_s / 60)).join(", ")}` : "";
   $("s_err").innerHTML = ss.status === "rejected" ? `<div class="rej">settings.json rejected: ${esc(ss.error || "invalid")}${ss.rejected_wib ? " (" + fH(ss.rejected_wib) + ")" : ""}. Bot keeps the values above.</div>` : "";
+  const C = D.control || {}, LC = C.last;
+  $("c_state").textContent = C.stopped_by_user ? "stopped by user" : (dm.alive ? "running" : "not running");
+  $("c_last").textContent = LC ? `Last command: ${LC.command} — ${LC.status} ${fT(LC.done_wib)} WIB${LC.detail ? " · " + LC.detail : ""}` : "";
+  if (C.sync_error) $("c_last").textContent += " · " + C.sync_error;
   drawChart(); renderList();
 }
 function renderList() {
@@ -250,16 +266,16 @@ function ghErr(st, j) {
 }
 const b64e = s => { const b = new TextEncoder().encode(s); let x = ""; for (const c of b) x += String.fromCharCode(c); return btoa(x); };
 const b64d = s => new TextDecoder().decode(Uint8Array.from(atob(s.replace(/\s/g, "")), c => c.charCodeAt(0)));
-async function ghGet() {
-  const r = await fetch(GH + "settings.json?ref=settings&t=" + Date.now(), {headers: ghH(), cache: "no-store"});
+async function ghGet(path) {
+  const r = await fetch(GH + (path || "settings.json") + "?ref=settings&t=" + Date.now(), {headers: ghH(), cache: "no-store"});
   const j = await r.json().catch(() => null);
   if (!r.ok) throw {st: r.status, j};
   let obj = {}; try { obj = JSON.parse(b64d(j.content)); if (typeof obj !== "object" || !obj || Array.isArray(obj)) obj = {}; } catch (e) { obj = {}; }
   return {sha: j.sha, obj};
 }
-async function ghPut(obj, sha, msg) {
-  const r = await fetch(GH + "settings.json", {method: "PUT", headers: {...ghH(), "Content-Type": "application/json"},
-    body: JSON.stringify({message: msg, content: b64e(JSON.stringify(obj, null, 2) + "\n"), sha, branch: "settings"})});
+async function ghPut(obj, sha, msg, path) {
+  const b = {message: msg, content: b64e(JSON.stringify(obj, null, 2) + "\n"), branch: "settings"}; if (sha) b.sha = sha;
+  const r = await fetch(GH + (path || "settings.json"), {method: "PUT", headers: {...ghH(), "Content-Type": "application/json"}, body: JSON.stringify(b)});
   const j = await r.json().catch(() => null);
   if (!r.ok) throw {st: r.status, j};
   return j;
@@ -318,6 +334,46 @@ $("f_save").onclick = fSave;
 $("f_reset").onclick = () => { fDirty = false; fFill(true); fMsg("", "inf"); };
 $("f_sloff").onchange = () => { $("f_sl").disabled = $("f_sloff").checked; fDirty = true; };
 ["f_tp", "f_sl", "f_cd"].forEach(id => $(id).addEventListener("input", () => { fDirty = true; }));
+// ---------- controls: commits control.json {command, nonce, requested_at} to the 'settings' branch ----------
+let cPollT = null;
+function cMsg(t, c) { $("c_msg").className = "msg " + (c || "inf"); $("c_msg").textContent = t; }
+const cBtns = on => ["start", "stop", "close_all", "reset"].forEach(k => $("c_" + k).disabled = !on);
+const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, "0")).join(""));
+const CNAME = {start: "Start", stop: "Stop", close_all: "Close all", reset: "Reset"};
+function cPoll(nonce, cmd) {
+  clearTimeout(cPollT); const end = Date.now() + 5 * 60e3;
+  const step = async () => {
+    try {
+      const r = await fetch(GH + "data.json?ref=main&t=" + Date.now(), {headers: {...ghH(), "Accept": "application/vnd.github.raw+json"}, cache: "no-store"});
+      if (r.ok) {
+        const d = await r.json(), L = (d.control || {}).last;
+        if (!D || d.generated_ts >= D.generated_ts) { D = d; render(); }
+        if (L && L.nonce === nonce) { cMsg(`${CNAME[cmd]}: ${L.status} at ${fT(L.done_wib)} WIB${L.detail ? " — " + L.detail : ""}`, L.status === "done" ? "ok" : "bad"); cBtns(true); return; }
+      }
+    } catch (e) {}
+    if (Date.now() < end) cPollT = setTimeout(step, 10000);
+    else { cMsg(`${CNAME[cmd]} was sent, but the bot has not confirmed in 5 min. The pusher may be down; check back later.`, "bad"); cBtns(true); }
+  };
+  cPollT = setTimeout(step, 10000);
+}
+async function cSend(cmd) {
+  if (!tok()) { cMsg("Connect your GitHub token in Settings above first.", "bad"); return; }
+  if (cmd === "stop" && !confirm("Stop the bot?\nOpen positions stay open but are not managed (no TP/SL) until you press Start.")) return;
+  if (cmd === "close_all" && !confirm("Close ALL open paper positions at the current market price?")) return;
+  if (cmd === "reset") { const t = prompt("Reset the paper account to the starting balance?\nThis clears open positions and trade history (the old ledger is archived first).\n\nType RESET to confirm:"); if (t !== "RESET") { cMsg("Reset cancelled (you must type RESET).", "inf"); return; } }
+  cBtns(false); cMsg(`Sending ${CNAME[cmd]}…`, "inf");
+  const nonce = uuid(), body = {_help: "Written by the dashboard Controls. The bot runs each nonce once; commands older than 15 min are ignored.", command: cmd, nonce, requested_at: new Date().toISOString()};
+  try {
+    let tries = 0;
+    for (;;) {
+      let sha = null; try { sha = (await ghGet("control.json")).sha; } catch (e) { if (!(e && e.st === 404)) throw e; }
+      try { await ghPut(body, sha, `control: ${cmd} (from dashboard)`, "control.json"); break; }
+      catch (e) { if (e && e.st === 409 && tries++ < 1) continue; throw e; }
+    }
+    cMsg(`${CNAME[cmd]} sent — the bot runs it within ~30 s…`, "ok"); cPoll(nonce, cmd);
+  } catch (e) { cMsg(e && e.st ? ghErr(e.st, e.j) : "Network error talking to GitHub. Try again.", "bad"); cBtns(true); }
+}
+["start", "stop", "close_all", "reset"].forEach(k => $("c_" + k).onclick = () => cSend(k));
 fShow();
 const _render = render; render = function () { _render(); fFill(false); };
 load(); setInterval(load, 60000); setInterval(() => D && render(), 15000);
