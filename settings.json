@@ -1,6 +1,6 @@
 {
   "_help": "Edit the 3 values below and commit: take_profit_usdt = net USDT profit that closes a trade (>0, <=1000); stop_loss_usdt = net USDT loss that closes a trade (null or 0 = off, max 1000); tp_cooldown_minutes = block re-entry in a coin for N minutes after it closed via take profit (0 = off, max 10080 = 7 days). Applied to the paper bot within ~1 min; invalid values are rejected and shown on the page.",
   "take_profit_usdt": 4,
-  "stop_loss_usdt": null,
+  "stop_loss_usdt": 999,
   "tp_cooldown_minutes": 30
 }
