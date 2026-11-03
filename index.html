@@ -46,6 +46,15 @@ footer a{color:var(--mut)}
 .btn{display:inline-block;background:var(--acc);color:#fff;text-decoration:none;border-radius:10px;padding:8px 14px;font-weight:600;font-size:14px}
 .sv{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:8px 0}.sv div{background:#0e141b;border:1px solid var(--line);border-radius:10px;padding:8px}
 .sv .k{color:var(--mut);font-size:11px}.sv .v{font-weight:650;font-size:16px;margin-top:2px}
+.fm{margin-top:10px;border-top:1px solid var(--line);padding-top:10px}
+.fm .f{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}@media(max-width:420px){.fm .f{grid-template-columns:1fr 1fr}}
+.fm label{display:flex;flex-direction:column;gap:4px;color:var(--mut);font-size:12px}
+.fm input[type=number],.fm input[type=password]{width:100%;background:#0e141b;color:var(--tx);border:1px solid var(--line);border-radius:10px;padding:10px;font:inherit;font-size:16px}
+.fm input:disabled{opacity:.4}.fm .ck{flex-direction:row;align-items:center;gap:8px;font-size:14px;color:var(--tx)}.fm .ck input{width:20px;height:20px}
+.fm .acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;align-items:center}
+.fm button{background:var(--acc);color:#fff;border:0;border-radius:10px;padding:10px 16px;font:inherit;font-weight:600;font-size:15px;cursor:pointer}
+.fm button.sec{background:transparent;color:var(--mut);border:1px solid var(--line);font-weight:500}
+.fm button:disabled{opacity:.5}.msg{font-size:13px;margin-top:8px}.msg.ok{color:var(--g)}.msg.bad{color:var(--r)}.msg.inf{color:var(--mut)}
 .rej{background:rgba(239,68,68,.14);color:var(--r);border-radius:10px;padding:8px 10px;font-size:13px;margin-top:6px}
 </style>
 </head>
@@ -60,11 +69,28 @@ footer a{color:var(--mut)}
     <div class="m"><div class="k">Open positions</div><div class="v" id="oc">–</div><div class="s" id="ocs"></div></div>
   </div>
   <div class="card" id="setcard">
-    <div class="row"><b style="font-size:14px">Settings (applied)</b><a class="btn" id="editbtn" target="_blank" rel="noopener" href="https://github.com/dedkovic441-hub/mexc-futures-dashboard/edit/settings/settings.json">Edit settings</a></div>
+    <div class="row"><b style="font-size:14px">Settings (applied)</b><a class="btn" id="editbtn" target="_blank" rel="noopener" style="background:transparent;border:1px solid var(--line);color:var(--mut);font-weight:500;font-size:13px" href="https://github.com/dedkovic441-hub/mexc-futures-dashboard/edit/settings/settings.json">Edit on GitHub</a></div>
     <div class="sv"><div><div class="k">Take profit (net)</div><div class="v" id="s_tp">–</div></div><div><div class="k">Stop loss (net)</div><div class="v" id="s_sl">–</div></div><div><div class="k">TP cooldown</div><div class="v" id="s_cd">–</div></div></div>
     <div class="s" style="color:var(--mut);font-size:12px" id="s_meta"></div>
     <div class="s" style="color:var(--mut);font-size:12px" id="s_cool"></div>
     <div id="s_err"></div>
+    <div class="fm" id="fm">
+      <div id="f_conn">
+        <label>Connect GitHub (fine-grained token with Contents: Read and write on this repo; stored only in this browser)
+          <input type="password" id="f_tok" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="github_pat_…"></label>
+        <div class="acts"><button id="f_tsave">Connect</button></div>
+      </div>
+      <div id="f_form" style="display:none">
+        <div class="f">
+          <label>Take profit (USDT net)<input type="number" id="f_tp" inputmode="decimal" min="0.01" max="1000" step="0.5"></label>
+          <label>Stop loss (USDT net)<input type="number" id="f_sl" inputmode="decimal" min="0" max="1000" step="0.5"></label>
+          <label>Cooldown (min, 0 = off)<input type="number" id="f_cd" inputmode="numeric" min="0" max="10080" step="5"></label>
+        </div>
+        <div class="acts"><label class="ck"><input type="checkbox" id="f_sloff"> Stop loss off</label></div>
+        <div class="acts"><button id="f_save">Save</button><button class="sec" id="f_reset">Reset to applied</button><button class="sec" id="f_forget">Forget token</button></div>
+      </div>
+      <div class="msg" id="f_msg"></div>
+    </div>
   </div>
   <div class="card">
     <div class="row"><b style="font-size:14px">Equity (USDT)</b>
@@ -199,6 +225,101 @@ $("tabs").onclick = e => { const b = e.target.closest("button"); if (!b) return;
 $("sort").onchange = () => D && renderList();
 window.addEventListener("resize", () => D && drawChart());
 document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
+// ---------- in-page settings: commits settings.json to the 'settings' branch via api.github.com ----------
+// The token is kept ONLY in this browser's localStorage and only sent to api.github.com. Never logged.
+const GH = "https://api.github.com/repos/dedkovic441-hub/mexc-futures-dashboard/contents/";
+const TOKK = "mf_gh_token", LIM = {tp: 1000, sl: 1000, cd: 10080};
+let fDirty = false, pollT = null;
+const tok = () => { try { return localStorage.getItem(TOKK) || ""; } catch (e) { return ""; } };
+function fMsg(t, c) { $("f_msg").className = "msg " + (c || "inf"); $("f_msg").textContent = t; }
+function fShow() { const has = !!tok(); $("f_conn").style.display = has ? "none" : ""; $("f_form").style.display = has ? "" : "none"; }
+function fFill(force) {
+  if (!D || !D.settings || (fDirty && !force)) return;
+  const v = D.settings, off = !v.stop_loss_usdt;
+  $("f_tp").value = v.take_profit_usdt ?? ""; $("f_cd").value = v.tp_cooldown_minutes ?? 0;
+  $("f_sloff").checked = off; $("f_sl").disabled = off; $("f_sl").value = off ? "" : v.stop_loss_usdt; fDirty = false;
+}
+const ghH = () => ({"Authorization": "Bearer " + tok(), "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"});
+function ghErr(st, j) {
+  const m = (j && j.message) ? " (GitHub: " + j.message + ")" : "";
+  if (st === 401) return "Token rejected: wrong or expired. Tap Forget token and connect a new one." + m;
+  if (st === 403) return "Token lacks permission: it needs Repository permissions → Contents: Read and write on mexc-futures-dashboard (or rate limit)." + m;
+  if (st === 404) return "Not found with this token: the token must have access to dedkovic441-hub/mexc-futures-dashboard (Only select repositories) with Contents: Read and write." + m;
+  if (st === 422) return "GitHub refused the change." + m;
+  return "GitHub error " + st + m;
+}
+const b64e = s => { const b = new TextEncoder().encode(s); let x = ""; for (const c of b) x += String.fromCharCode(c); return btoa(x); };
+const b64d = s => new TextDecoder().decode(Uint8Array.from(atob(s.replace(/\s/g, "")), c => c.charCodeAt(0)));
+async function ghGet() {
+  const r = await fetch(GH + "settings.json?ref=settings&t=" + Date.now(), {headers: ghH(), cache: "no-store"});
+  const j = await r.json().catch(() => null);
+  if (!r.ok) throw {st: r.status, j};
+  let obj = {}; try { obj = JSON.parse(b64d(j.content)); if (typeof obj !== "object" || !obj || Array.isArray(obj)) obj = {}; } catch (e) { obj = {}; }
+  return {sha: j.sha, obj};
+}
+async function ghPut(obj, sha, msg) {
+  const r = await fetch(GH + "settings.json", {method: "PUT", headers: {...ghH(), "Content-Type": "application/json"},
+    body: JSON.stringify({message: msg, content: b64e(JSON.stringify(obj, null, 2) + "\n"), sha, branch: "settings"})});
+  const j = await r.json().catch(() => null);
+  if (!r.ok) throw {st: r.status, j};
+  return j;
+}
+function fRead() {
+  const tp = parseFloat($("f_tp").value), off = $("f_sloff").checked, sl = off ? null : parseFloat($("f_sl").value), cd = parseFloat($("f_cd").value === "" ? "0" : $("f_cd").value);
+  if (!(tp > 0 && tp <= LIM.tp)) throw "Take profit must be more than 0 and at most 1000 USDT.";
+  if (!off && !(sl >= 0 && sl <= LIM.sl)) throw "Stop loss must be 0–1000 USDT, or tick “Stop loss off”.";
+  if (!(cd >= 0 && cd <= LIM.cd)) throw "Cooldown must be 0–10080 minutes (7 days).";
+  return {take_profit_usdt: tp, stop_loss_usdt: sl === 0 ? null : sl, tp_cooldown_minutes: cd};
+}
+const same = (a, b) => a && b && Number(a.take_profit_usdt) === Number(b.take_profit_usdt) && (a.stop_loss_usdt || null) === (b.stop_loss_usdt || null) && Number(a.tp_cooldown_minutes || 0) === Number(b.tp_cooldown_minutes || 0);
+async function pollApplied(want, prev) {  // prev = settings_sync before the save (avoids depending on the phone's clock)
+  clearTimeout(pollT); const end = Date.now() + 6 * 60e3;
+  const step = async () => {
+    try {
+      const r = await fetch(GH + "data.json?ref=main&t=" + Date.now(), {headers: {...ghH(), "Accept": "application/vnd.github.raw+json"}, cache: "no-store"});
+      if (r.ok) {
+        const d = await r.json(), ss = d.settings_sync || {};
+        if (!D || d.generated_ts >= D.generated_ts) { D = d; render(); }
+        if (ss.status === "rejected" && ss.remote_seen_wib && ss.remote_seen_wib !== prev.remote_seen_wib) { fMsg("Bot rejected the settings: " + (ss.error || "invalid") + ". Previous values are kept.", "bad"); return; }
+        if (same(d.settings, want) && ss.last_applied_wib && ss.last_applied_wib !== prev.last_applied_wib) { fMsg("Applied at " + fT(ss.last_applied_wib) + " WIB ✓", "ok"); fDirty = false; fFill(true); return; }
+      }
+    } catch (e) {}
+    if (Date.now() < end) pollT = setTimeout(step, 10000); else fMsg("Saved on GitHub, but the bot has not confirmed yet (is it running?). Check back in a few minutes.", "bad");
+  };
+  pollT = setTimeout(step, 8000);
+}
+async function fSave() {
+  let want; try { want = fRead(); } catch (e) { fMsg(e, "bad"); return; }
+  if (D && same(D.settings, want)) { fMsg("These are already the applied values. Nothing to save.", "inf"); return; }
+  $("f_save").disabled = true; fMsg("Saving…", "inf"); const prev = {...((D && D.settings_sync) || {})};
+  const msg = `settings: TP ${want.take_profit_usdt} / SL ${want.stop_loss_usdt ?? "off"} / cooldown ${want.tp_cooldown_minutes} (from dashboard)`;
+  try {
+    let tries = 0;
+    for (;;) {
+      const cur = await ghGet();
+      const obj = {...cur.obj, ...want};
+      try { await ghPut(obj, cur.sha, msg); break; }
+      catch (e) { if (e && e.st === 409 && tries++ < 1) continue; throw e; }   // sha conflict: refetch once
+    }
+    fMsg("Saved — bot applies in ~1 min…", "ok"); pollApplied(want, prev);
+  } catch (e) {
+    fMsg(e && e.st ? ghErr(e.st, e.j) : "Network error talking to GitHub. Try again.", "bad");
+  } finally { $("f_save").disabled = false; }
+}
+$("f_tsave").onclick = async () => {
+  const t = $("f_tok").value.trim(); if (!t) { fMsg("Paste your token first.", "bad"); return; }
+  try { localStorage.setItem(TOKK, t); } catch (e) { fMsg("This browser blocks storage (private mode?).", "bad"); return; }
+  $("f_tok").value = ""; fMsg("Checking token…", "inf");
+  try { await ghGet(); fMsg("Connected. Change values and tap Save.", "ok"); fShow(); fFill(true); }
+  catch (e) { localStorage.removeItem(TOKK); fMsg(e && e.st ? ghErr(e.st, e.j) : "Network error talking to GitHub.", "bad"); fShow(); }
+};
+$("f_forget").onclick = () => { try { localStorage.removeItem(TOKK); } catch (e) {} clearTimeout(pollT); fShow(); fMsg("Token removed from this browser.", "inf"); };
+$("f_save").onclick = fSave;
+$("f_reset").onclick = () => { fDirty = false; fFill(true); fMsg("", "inf"); };
+$("f_sloff").onchange = () => { $("f_sl").disabled = $("f_sloff").checked; fDirty = true; };
+["f_tp", "f_sl", "f_cd"].forEach(id => $(id).addEventListener("input", () => { fDirty = true; }));
+fShow();
+const _render = render; render = function () { _render(); fFill(false); };
 load(); setInterval(load, 60000); setInterval(() => D && render(), 15000);
 </script>
 </body>
