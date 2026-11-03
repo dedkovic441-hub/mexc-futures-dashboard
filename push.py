@@ -4,10 +4,13 @@ Reads /workspace/mexc-futures status.json, ledger.json, config.json, futuresd.pi
 127.0.0.1:8798/api/history). Never calls watchdog.py. Its ONLY write there: config.json strategy.take_profit_usdt /
 stop_loss_usdt / tp_cooldown_minutes, via dash/server.py's validate()+save_settings() (atomic, locked, backup
 config.json.bak-settings-last), when the repo's settings.json changes.
-Every SAMPLE_EVERY_S: git fetch origin main. Settings sync (state in state/settings_sync.json):
-  - origin settings.json hash != last processed hash -> user edit: validate (same rules as /api/settings, keys starting
+Every SAMPLE_EVERY_S: git fetch origin main + settings. Settings live on the dedicated branch 'settings' (file settings.json),
+which this script NEVER force-pushes; it only reads it, and mirror writes are normal commits via the GitHub contents API
+(gh api PUT with the current blob sha; a 409 means the user just edited it -> their edit wins next cycle).
+main's settings.json is only a stub pointing to that branch. Settings sync (state in state/settings_sync.json):
+  - origin/settings:settings.json hash != last processed hash -> user edit: validate (same rules as /api/settings, keys starting
     with '_' ignored); valid -> apply to config.json; invalid -> not applied, error shown on the page. GitHub wins.
-  - else if config.json values != last synced values (local panel save) -> mirror them into settings.json (own commit).
+  - else if config.json values != last synced values (local panel save) -> mirror them into settings.json (contents API commit).
 Push (every PUSH_EVERY_S, or at once after a settings event): data lives in one 'data snapshot' commit by
 mexc-futures-pusher on top of origin/main. If origin's tip is that commit it is replaced (parent = its parent),
 otherwise (a user commit is on top) the new data commit goes on top of origin's tip. Pushed with
@@ -27,7 +30,8 @@ DATA_MSG = "data snapshot"
 DASH_HIST = "http://127.0.0.1:8798/api/history"
 PUSHER_NAME = "mexc-futures-pusher"; PUSHER_EMAIL = "pusher@users.noreply.github.com"
 SETTINGS = "settings.json"; SYNC_FILE = os.path.join(STATE, "settings_sync.json")
-EDIT_URL = "https://github.com/dedkovic441-hub/mexc-futures-dashboard/edit/main/settings.json"
+REPO = "dedkovic441-hub/mexc-futures-dashboard"; SET_BRANCH = "settings"
+EDIT_URL = f"https://github.com/{REPO}/edit/{SET_BRANCH}/settings.json"
 SET_HELP = ("Edit the 3 values below and commit: take_profit_usdt = net USDT profit that closes a trade (>0, <=1000); "
             "stop_loss_usdt = net USDT loss that closes a trade (null or 0 = off, max 1000); tp_cooldown_minutes = block "
             "re-entry in a coin for N minutes after it closed via take profit (0 = off, max 10080 = 7 days). "
@@ -116,12 +120,23 @@ def config_values():
 def settings_text(v):
     return json.dumps({"_help": SET_HELP, **{k: v.get(k) for k in ("take_profit_usdt", "stop_loss_usdt", "tp_cooldown_minutes")}}, indent=2) + "\n"
 def fetch():
-    git("fetch", "-q", "origin", "main")
+    git("fetch", "-q", "origin", "main", SET_BRANCH)
     return git("rev-parse", "refs/remotes/origin/main")
+def gh_put_settings(text):
+    """normal (fast-forward) commit of settings.json on the settings branch via the contents API; never forces."""
+    import base64
+    blob = git("rev-parse", f"refs/remotes/origin/{SET_BRANCH}:{SETTINGS}", check=False) or None
+    msg = "settings: init from bot config" if load_sync().get("pending_reason") == "init" else "settings: sync from bot config (local panel)"
+    args = ["gh", "api", "-X", "PUT", f"repos/{REPO}/contents/{SETTINGS}", "-f", f"message={msg}", "-f", f"branch={SET_BRANCH}",
+            "-f", "content=" + base64.b64encode(text.encode()).decode(), "--jq", ".commit.sha"]
+    if blob: args += ["-f", f"sha={blob}"]
+    r = subprocess.run(args, capture_output=True, text=True, timeout=60)
+    if r.returncode: raise RuntimeError(f"settings mirror via contents API failed: {(r.stderr or r.stdout).strip()[:300]}")
+    return r.stdout.strip()
 def sync_settings(R):
     """-> (urgent, mirror_text or None). Never raises for a bad user file."""
     S = srv(); st = load_sync(); urgent = False; mirror = None
-    r = subprocess.run(["git", "-C", HERE, "show", f"{R}:{SETTINGS}"], capture_output=True, text=True)
+    r = subprocess.run(["git", "-C", HERE, "show", f"refs/remotes/origin/{SET_BRANCH}:{SETTINGS}"], capture_output=True, text=True)
     txt = r.stdout if r.returncode == 0 else None
     cur = config_values()
     if txt is None:
@@ -222,17 +237,10 @@ def is_data_commit(rev):
 def commit(msg, path):
     git("add", path)
     git("-c", f"user.name={PUSHER_NAME}", "-c", f"user.email={PUSHER_EMAIL}", "commit", "-q", "--allow-empty", "-m", msg, "--", path)
-def push(R, mirror=None):
-    """rebuild on top of the fetched origin tip R; never drops a commit that is not our own data snapshot."""
+def push(R):
+    """main only: rebuild on top of the fetched origin tip R; never drops a commit that is not our own data snapshot."""
     base = git("rev-parse", f"{R}~1") if is_data_commit(R) else R
     git("reset", "-q", "--mixed", base)           # move HEAD+index only; working tree untouched
-    if mirror is not None:
-        tmp = os.path.join(HERE, SETTINGS + ".tmp")
-        with open(tmp, "w") as fh: fh.write(mirror)
-        os.replace(tmp, os.path.join(HERE, SETTINGS))
-        commit("settings: init from bot config" if load_sync().get("pending_reason") == "init" else "settings: sync from bot config (local panel)", SETTINGS)
-    elif git("ls-tree", "--name-only", "HEAD", SETTINGS):
-        git("checkout", "HEAD", "--", SETTINGS)    # keep the local copy equal to GitHub's
     commit(DATA_MSG, "data.json")
     git("push", "-q", f"--force-with-lease=refs/heads/main:{R}", "origin", "HEAD:main")
 
@@ -253,12 +261,12 @@ def main():
             sample(h)
             R = fetch(); urgent, mirror = sync_settings(R)
             if time.time() - last_push >= PUSH_EVERY_S or once or urgent:
+                if mirror is not None and not nopush:
+                    gh_put_settings(mirror); mirror_done(mirror)   # settings branch, normal commit
                 merge_dash_hist(h); h = save_hist(h)
                 d = write_data(h)
-                if not nopush:
-                    push(R, mirror)
-                    if mirror is not None: mirror_done(mirror)
-                last_push = time.time() if mirror is None else 0; fails = 0  # after a mirror, push again next cycle so the page shows it
+                if not nopush: push(R)
+                last_push = time.time(); fails = 0
                 log(f"pushed eq={d['snapshot']['equity_usdt']} open={d['snapshot']['open_count']} alive={d['daemon']['alive']} hist={len(d['history'])}")
         except Exception as e:
             fails += 1; last_push = time.time() - PUSH_EVERY_S + 30 * min(fails, 4)  # retry sooner

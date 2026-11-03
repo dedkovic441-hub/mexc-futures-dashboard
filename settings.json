@@ -1,6 +1,3 @@
 {
-  "_help": "Edit the 3 values below and commit: take_profit_usdt = net USDT profit that closes a trade (>0, <=1000); stop_loss_usdt = net USDT loss that closes a trade (null or 0 = off, max 1000); tp_cooldown_minutes = block re-entry in a coin for N minutes after it closed via take profit (0 = off, max 10080 = 7 days). Applied to the paper bot within ~1 min; invalid values are rejected and shown on the page.",
-  "take_profit_usdt": 5,
-  "stop_loss_usdt": null,
-  "tp_cooldown_minutes": 0
+  "_moved": "Settings are edited on the 'settings' branch, not here. Edit: https://github.com/dedkovic441-hub/mexc-futures-dashboard/edit/settings/settings.json . This file on main is ignored by the bot."
 }
