@@ -230,7 +230,7 @@ def push(R, mirror=None):
         tmp = os.path.join(HERE, SETTINGS + ".tmp")
         with open(tmp, "w") as fh: fh.write(mirror)
         os.replace(tmp, os.path.join(HERE, SETTINGS))
-        commit("settings: sync from bot config (local panel)", SETTINGS)
+        commit("settings: init from bot config" if load_sync().get("pending_reason") == "init" else "settings: sync from bot config (local panel)", SETTINGS)
     elif git("ls-tree", "--name-only", "HEAD", SETTINGS):
         git("checkout", "HEAD", "--", SETTINGS)    # keep the local copy equal to GitHub's
     commit(DATA_MSG, "data.json")
