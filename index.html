@@ -71,7 +71,8 @@ footer a{color:var(--mut)}
   <footer>
     <b>PAPER TRADING ONLY</b>: simulated positions, no real money or orders.<br>
     Snapshot pushed every ~2 min · page refreshes every 60 s · all times WIB (Asia/Jakarta)<br>
-    <span id="gen"></span>
+    <span id="gen"></span><br>
+    <span id="setv"></span>
   </footer>
 </div>
 <script>
@@ -124,6 +125,9 @@ function render() {
   $("ocs").textContent = `${st.closed_trades ?? 0} closed · win ${st.win_rate ?? "–"}%`;
   $("no").textContent = `(${D.open.length})`; $("nc").textContent = `(${D.closed.length})`;
   $("gen").textContent = `data generated ${fDT(D.generated_at)} WIB · bot heartbeat ${fT(dm.heartbeat_wib, 1)} WIB`;
+  const cf = D.settings || {}, hmn = m => m >= 60 ? (m / 60).toFixed(m % 60 ? 1 : 0) + "h" : m + "m", cds = D.cooldowns || [];
+  $("setv").innerHTML = D.settings ? `Settings (read-only): take profit ${cf.take_profit_usdt ? "+$" + cf.take_profit_usdt + " net" : "off"} · stop loss ${cf.stop_loss_usdt ? "−$" + cf.stop_loss_usdt + " net" : "off (paper liquidation only)"} · TP cooldown ${cf.tp_cooldown_minutes ? hmn(cf.tp_cooldown_minutes) : "off"}` +
+    (cds.length ? `<br>Cooling down: ${cds.map(c => esc(base(c.symbol)) + " " + held(c.left_s / 60)).join(", ")}` : "") : "";
   drawChart(); renderList();
 }
 function renderList() {

@@ -122,6 +122,10 @@ def build(h):
             "ledger_created_wib": led.get("created"), "ledger_updated_wib": led.get("updated"),
             "strategy": st.get("strategy"), "leverage": port.get("leverage"), "stake_usdt": port.get("stake_usdt"),
         },
+        "settings": {k: (cfg.get("strategy") or {}).get(k, 0 if k == "tp_cooldown_minutes" else None)
+                     for k in ("take_profit_usdt", "stop_loss_usdt", "tp_cooldown_minutes")},  # read-only display
+        "cooldowns": [{"symbol": c.get("symbol"), "until_wib": c.get("until_wib"), "left_s": c.get("left_s")}
+                      for c in (st.get("cooldowns") or []) if isinstance(c, dict)][:30],
         "stats": {"closed_trades": len(closed_all), "wins": wins,
                   "win_rate": round(100 * wins / len(closed_all), 1) if closed_all else None,
                   "closed_pnl_usdt": round(sum(c.get("pnl_usdt") or 0 for c in closed_all), 4)},
