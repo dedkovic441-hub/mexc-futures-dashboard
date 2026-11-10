@@ -17,6 +17,7 @@ otherwise (a user commit is on top) the new data commit goes on top of origin's 
 --force-with-lease=<fetched origin sha>, so a user commit made in between is never overwritten (push fails, retried).
 Usage: python3 push.py [--once] [--no-push]"""
 import json, os, sys, time, subprocess, urllib.request, traceback, hashlib, importlib.util
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 
 BOT = "/workspace/mexc-futures"
@@ -106,6 +107,35 @@ def srv():
         sp = importlib.util.spec_from_file_location("mf_dash_server", os.path.join(BOT, "dash", "server.py"))
         m = importlib.util.module_from_spec(sp); sp.loader.exec_module(m); _SRV = m
     return _SRV
+_CHART = None
+def chartlib():
+    global _CHART
+    if _CHART is None:
+        sp = importlib.util.spec_from_file_location("mf_chart_lib", os.path.join(BOT, "dash", "chart_lib.py"))
+        m = importlib.util.module_from_spec(sp); sp.loader.exec_module(m); _CHART = m
+    return _CHART
+def attach_klines(opn):
+    """Fetch 15m klines for each open position (public REST). Failures leave klines empty."""
+    if not opn: return opn
+    CL = chartlib()
+    def one(p):
+        try:
+            bars = CL.fetch_klines(p["symbol"], opened_at=p.get("opened_at"))
+            bars = CL.apply_mark(bars, p.get("mark"))
+            return p["symbol"], bars, None
+        except Exception as e:
+            return p["symbol"], [], repr(e)[:160]
+    found = {}
+    with ThreadPoolExecutor(max_workers=min(8, len(opn))) as ex:
+        futs = [ex.submit(one, p) for p in opn]
+        for f in as_completed(futs, timeout=25):
+            sym, bars, err = f.result()
+            found[sym] = bars
+            if err: log("klines", sym, err)
+    for p in opn:
+        p["klines"] = found.get(p["symbol"]) or []
+        p["kline_interval"] = "15m"
+    return opn
 def wib_now(): return datetime.now(WIB).isoformat(timespec="seconds")
 def sha(t): return hashlib.sha256(t.encode()).hexdigest()
 def load_sync():
@@ -201,15 +231,24 @@ def build(h):
     pid, alive = daemon_alive()
     now = time.time(); hb = iso_ts(st.get("heartbeat_wib") or "")
     led_open = led.get("open") or {}
+    settings = {k: (cfg.get("strategy") or {}).get(k, 0 if k == "tp_cooldown_minutes" else None)
+                for k in ("take_profit_usdt", "stop_loss_usdt", "tp_cooldown_minutes")}
+    CL = chartlib()
     opn = []
     for p in st.get("open_positions") or led.get("open_positions") or []:
         lo = led_open.get(p["symbol"], {})
-        opn.append({
-            "symbol": p["symbol"], "side": p.get("side"), "entry": p.get("fill_px"), "mark": p.get("mark"),
+        row = {
+            "symbol": p["symbol"], "side": p.get("side"), "entry": p.get("fill_px"), "fill_px": p.get("fill_px"),
+            "ref_px": lo.get("ref_px") or p.get("ref_px"), "mark": p.get("mark"),
             "pnl_usdt": p.get("pnl_usdt"), "pnl_pct": p.get("pnl_pct"), "liq_px": p.get("liq_px") or p.get("stop_px"),
-            "leverage": p.get("leverage"), "notional_usdt": p.get("notional_usdt"), "held_min": p.get("held_min"),
+            "leverage": p.get("leverage"), "notional_usdt": p.get("notional_usdt") or lo.get("notional_usdt"),
+            "held_min": p.get("held_min"), "url": p.get("url") or lo.get("url") or f"https://futures.mexc.com/exchange/{p['symbol']}",
             "opened_wib": lo.get("opened_wib") or p.get("opened_wib"), "opened_at": lo.get("opened_at") or p.get("opened_at"),
-        })
+            "cost_side": lo.get("cost_side"), "funding_frac": lo.get("funding_frac", 0.0), "side_sign": lo.get("side_sign") or p.get("side_sign"),
+        }
+        row.update(CL.levels(row, settings))
+        opn.append(row)
+    attach_klines(opn)
     closed_all = led.get("closed") or []
     closed = [{
         "symbol": c["symbol"], "side": c.get("side"), "entry": c.get("entry_fill_px"), "exit": c.get("exit_fill_px"),

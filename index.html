@@ -122,6 +122,7 @@ footer a{color:var(--mut)}
     <span id="gen"></span>
   </footer>
 </div>
+<script src="poscharts.js"></script>
 <script>
 const RAW = "https://raw.githubusercontent.com/dedkovic441-hub/mexc-futures-dashboard/main/data.json";
 const STALE_S = 12 * 60;
@@ -195,12 +196,13 @@ function renderList() {
   if (by === "pnl") rows.sort((a, b) => (b.pnl_usdt || 0) - (a.pnl_usdt || 0));
   else if (by === "new") rows.sort((a, b) => tk(b) - tk(a));
   else rows.sort((a, b) => a.symbol.localeCompare(b.symbol));
+  if (tab === "open") {
+    try { MFPosCharts.render(L, rows, {emptyText: "No open trades"}); }
+    catch (e) { L.innerHTML = rows.length ? `<div class="empty">chart error</div>` : `<div class="empty">No open trades</div>`; }
+    return;
+  }
   if (!rows.length) { L.innerHTML = `<div class="empty">No ${tab} positions</div>`; return; }
-  L.innerHTML = rows.map(r => tab === "open" ? `
-    <div class="it"><div class="top"><div>${link(r.symbol)}<span class="side ${r.side}">${(r.side || "").toUpperCase()}</span></div>
-      <div class="pnl ${cls(r.pnl_usdt)}">${sg(r.pnl_usdt)} USDT<br><small>${sg(r.pnl_pct)}%</small></div></div>
-      <div class="det"><span>Entry <b>${px(r.entry)}</b></span><span>Mark <b>${px(r.mark)}</b></span><span>Liq <b>${px(r.liq_px)}</b></span>
-      <span>Opened <b>${fDT(r.opened_wib)}</b></span><span>Held <b>${held(r.held_min)}</b></span><span>${r.leverage ?? ""}x · ${n2(r.notional_usdt)}</span></div></div>` : `
+  L.innerHTML = rows.map(r => `
     <div class="it"><div class="top"><div>${link(r.symbol)}<span class="side ${r.side}">${(r.side || "").toUpperCase()}</span></div>
       <div class="pnl ${cls(r.pnl_usdt)}">${sg(r.pnl_usdt)} USDT<br><small>${sg(r.pnl_pct)}%</small></div></div>
       <div class="det"><span>Entry <b>${px(r.entry)}</b></span><span>Exit <b>${px(r.exit)}</b></span><span>Held <b>${held(r.held_min)}</b></span>
