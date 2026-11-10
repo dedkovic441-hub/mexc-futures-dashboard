@@ -1,6 +1,6 @@
 {
   "_help": "Written by the dashboard Controls. The bot runs each nonce once; commands older than 15 min are ignored.",
   "command": "start",
-  "nonce": "b75aa724-ecf5-4554-bdbf-591117c64567",
-  "requested_at": "2026-11-03T03:47:23.507Z"
+  "nonce": "dbeecde3-6ad2-4fab-8758-6ce1b38ce842",
+  "requested_at": "2026-11-10T17:03:06.787Z"
 }
