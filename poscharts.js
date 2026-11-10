@@ -263,28 +263,25 @@
   function paintCard(el, p) {
     el._pos = p;
     if (!el._ro && typeof ResizeObserver !== "undefined") {
-      el._ro = new ResizeObserver(() => {
-        const q = el._pos; if (!q) return;
-        const cv = el.querySelector("canvas.mf-ohlc");
-        const sz = (cv && cv.clientWidth) + "x" + (cv && cv.clientHeight);
-        if (sz === el._sz) return;
-        paintCard(el, q);
-      });
+      el._ro = new ResizeObserver(() => { if (el._pos) paintCard(el, el._pos); });
       el._ro.observe(el);
     }
     const bars = applyMark(toBars(p.klines || p.bars || []), p.mark, Date.now() / 1000);
     const cv = el.querySelector("canvas.mf-ohlc");
     if (!cv) return;
-    el._sz = cv.clientWidth + "x" + cv.clientHeight;
+    const Wcss = cv.clientWidth, Hcss = cv.clientHeight || 220, dpr = window.devicePixelRatio || 1;
+    if (Wcss < 40) return; // layout not ready; ResizeObserver will retry
+    const wantW = Math.round(Wcss * dpr), wantH = Math.round(Hcss * dpr);
+    const sz = wantW + "x" + wantH + "x" + (p.mark || "") + "x" + (bars.length ? bars[bars.length-1].c : "") + "x" + (p._liqOff ? 1 : 0);
+    if (sz === el._sz && cv.width === wantW && cv.height === wantH) return;
     if (!bars.length) {
+      cv.width = wantW; cv.height = wantH;
       const g = cv.getContext("2d");
-      const dpr = window.devicePixelRatio || 1;
-      const W = cv.clientWidth || 320, H = 220;
-      cv.width = W * dpr; cv.height = H * dpr;
       g.setTransform(dpr, 0, 0, dpr, 0, 0);
-      g.clearRect(0, 0, W, H);
+      g.clearRect(0, 0, Wcss, Hcss);
       g.fillStyle = "#8b949e"; g.font = "12px sans-serif"; g.textAlign = "center";
-      g.fillText(p._klineErr || "Loading 15m candles…", W / 2, H / 2);
+      g.fillText(p._klineErr || "Loading 15m candles…", Wcss / 2, Hcss / 2);
+      el._sz = sz;
       return;
     }
     const lns = linesOf(p);
@@ -297,6 +294,7 @@
       return paintCard(el, p);
     }
     draw(el.querySelector("canvas.mf-ohlc"), bars, { lines: lns, entryAt: p.opened_at || (p.opened_wib ? Date.parse(p.opened_wib) / 1000 : null) });
+    el._sz = sz;
   }
 
   async function loadKlines(p, loader) {
