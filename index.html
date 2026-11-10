@@ -362,7 +362,7 @@ async function cSend(cmd) {
   if (!tok()) { cMsg("Connect your GitHub token in Settings above first.", "bad"); return; }
   if (cmd === "stop" && !confirm("Stop the bot?\nOpen positions stay open but are not managed (no TP/SL) until you press Start.")) return;
   if (cmd === "close_all" && !confirm("Close ALL open paper positions at the current market price?")) return;
-  if (cmd === "reset") { const t = prompt("Reset the paper account to the starting balance?\nThis clears open positions and trade history (the old ledger is archived first).\n\nType RESET to confirm:"); if (t !== "RESET") { cMsg("Reset cancelled (you must type RESET).", "inf"); return; } }
+  if (cmd === "reset" && !confirm("Reset paper account to 1000 USDT? Open trades will be closed.")) return;
   cBtns(false); cMsg(`Sending ${CNAME[cmd]}…`, "inf");
   const nonce = uuid(), body = {_help: "Written by the dashboard Controls. The bot runs each nonce once; commands older than 15 min are ignored.", command: cmd, nonce, requested_at: new Date().toISOString()};
   try {
