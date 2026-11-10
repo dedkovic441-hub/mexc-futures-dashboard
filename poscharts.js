@@ -90,20 +90,20 @@
   }
 
   function yRange(bars, lines) {
+    // Zoom to recent action plus Entry/TP/SL so a far-away liquidation line does not squash the trade.
+    const use = bars.slice(-32);
     let lo = Infinity, hi = -Infinity;
-    for (const b of bars) { if (b.l < lo) lo = b.l; if (b.h > hi) hi = b.h; }
-    const near = [];
+    for (const b of use) { if (b.l < lo) lo = b.l; if (b.h > hi) hi = b.h; }
     const padAmt = (hi - lo) || Math.abs(hi) * 0.01 || 1e-9;
-    // Keep Entry/TP/SL in view; only include Liq when it is close enough not to squash the candles.
-    const liqLo = lo - padAmt * 1.4, liqHi = hi + padAmt * 1.4;
+    const liqLo = lo - padAmt * 0.8, liqHi = hi + padAmt * 0.8;
     for (const ln of lines) {
       if (ln.price == null || isNaN(ln.price)) continue;
       if (ln.key === "liq" && (ln.price < liqLo || ln.price > liqHi)) { ln.off = true; continue; }
-      near.push(ln.price);
+      if (ln.price < lo) lo = ln.price;
+      if (ln.price > hi) hi = ln.price;
     }
-    for (const v of near) { if (v < lo) lo = v; if (v > hi) hi = v; }
     if (!isFinite(lo) || !isFinite(hi) || lo === hi) { const m = isFinite(lo) ? lo : 1; lo = m * 0.99; hi = m * 1.01; }
-    const pad = (hi - lo) * 0.1 || Math.abs(hi) * 0.005;
+    const pad = (hi - lo) * 0.12 || Math.abs(hi) * 0.005;
     return { lo: lo - pad, hi: hi + pad };
   }
 
